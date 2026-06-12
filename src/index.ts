@@ -34,23 +34,47 @@ server.registerTool(
   {
     title: "Search mods",
     description:
-      "Search Nexus Mods for mods by name, game, author, or tag. Returns summaries with stats; use get_mod for full details. Adult content is always included.",
+      "Search Nexus Mods for mods by name, game, author, or tag — or batch-fetch specific mods via modIds. Returns summaries with stats; use get_mod for full details. Adult content is always included.",
     inputSchema: {
       query: z.string().optional().describe("Text to match against mod names (substring match)"),
       gameDomain: gameDomainParam.optional(),
       author: z.string().optional().describe("Filter by author name (exact)"),
       tag: z.string().optional().describe("Filter by tag name (exact)"),
+      modIds: z
+        .array(z.number().int())
+        .max(50)
+        .optional()
+        .describe(
+          "Batch-fetch these specific mod IDs (requires gameDomain). When set, query/author/tag are ignored.",
+        ),
       sortBy: z.enum(["endorsements", "downloads", "updatedAt", "createdAt", "relevance"]).default("endorsements"),
       offset: z.number().int().min(0).default(0),
       count: z.number().int().min(1).max(50).default(10),
     },
   },
-  async ({ query, gameDomain, author, tag, sortBy, offset, count }) => {
-    const filter: Record<string, unknown> = {};
-    if (query) filter.name = [{ value: query, op: "WILDCARD" }];
-    if (gameDomain) filter.gameDomainName = [{ value: gameDomain, op: "EQUALS" }];
-    if (author) filter.author = [{ value: author, op: "EQUALS" }];
-    if (tag) filter.tag = [{ value: tag, op: "EQUALS" }];
+  async ({ query, gameDomain, author, tag, modIds, sortBy, offset, count }) => {
+    let filter: Record<string, unknown> = {};
+    if (modIds?.length) {
+      if (!gameDomain) {
+        return jsonResult({ error: "modIds requires gameDomain to be set" });
+      }
+      // The API ANDs multiple values of one filter field, so a batch lookup
+      // needs explicit OR branches, each carrying the (required) gameId.
+      const gameId = await resolveGameId(gameDomain);
+      filter = {
+        op: "OR",
+        filter: modIds.map((id) => ({
+          modId: [{ value: String(id), op: "EQUALS" }],
+          gameId: [{ value: String(gameId), op: "EQUALS" }],
+        })),
+      };
+      count = Math.max(count, modIds.length);
+    } else {
+      if (query) filter.name = [{ value: query, op: "WILDCARD" }];
+      if (gameDomain) filter.gameDomainName = [{ value: gameDomain, op: "EQUALS" }];
+      if (author) filter.author = [{ value: author, op: "EQUALS" }];
+      if (tag) filter.tag = [{ value: tag, op: "EQUALS" }];
+    }
 
     const data = await gql<{ mods: { totalCount: number; nodes: Record<string, unknown>[] } }>(
       `query ($filter: ModsFilter, $sort: [ModsSort!], $offset: Int, $count: Int) {
@@ -404,7 +428,7 @@ server.registerTool(
   {
     title: "Run GraphQL query",
     description:
-      "Escape hatch: run an arbitrary read-only GraphQL query against the Nexus Mods v2 API (api.nexusmods.com/v2/graphql). Mutations are rejected. Use introspection (__schema/__type) to discover fields not covered by the other tools. Keep selections small — responses are returned verbatim.",
+      "Escape hatch: run an arbitrary read-only GraphQL query against the Nexus Mods v2 API (api.nexusmods.com/v2/graphql). Mutations are rejected. Use introspection (__schema/__type) to discover fields not covered by the other tools. Keep selections small — responses are returned verbatim. Filter semantics: multiple values for one filter field AND together; for OR, nest sub-filters under { op: OR, filter: [...] } with each branch carrying all required fields (e.g. gameId alongside modId).",
     inputSchema: {
       query: z.string().describe("GraphQL query document (no mutations)"),
       variables: z.record(z.string(), z.unknown()).optional(),
