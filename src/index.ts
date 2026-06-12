@@ -227,9 +227,15 @@ server.registerTool(
       slug: z.string().describe("Collection slug"),
       revision: z.number().int().optional().describe("Revision number; defaults to latest published"),
       includeModList: z.boolean().default(true),
+      modListOffset: z
+        .number()
+        .int()
+        .min(0)
+        .default(0)
+        .describe("Skip this many mods (alphabetical order) when the list is truncated"),
     },
   },
-  async ({ slug, revision, includeModList }) => {
+  async ({ slug, revision, includeModList, modListOffset }) => {
     const modFilesSel = includeModList
       ? `modFiles { optional version file { name version modId mod { modId name } } }`
       : "";
@@ -285,17 +291,32 @@ server.registerTool(
     let modList: unknown[] | undefined;
     let modListNote: string | undefined;
     if (rev?.modFiles) {
-      const entries = rev.modFiles.map((mf) => ({
-        mod: mf.file?.mod?.name ?? mf.file?.name ?? "(unknown)",
-        modId: mf.file?.mod?.modId,
-        version: mf.file?.version ?? mf.version,
-        optional: mf.optional || undefined,
-      }));
-      if (entries.length > MOD_LIST_CAP) {
-        modList = entries.slice(0, MOD_LIST_CAP);
-        modListNote = `Showing ${MOD_LIST_CAP} of ${entries.length} mods`;
-      } else {
-        modList = entries;
+      // A collection pins individual files, and one mod often contributes
+      // several (main file + patches) — group them so each mod appears once.
+      type ModGroup = { mod: string; modId: number | undefined; files: unknown[] };
+      const byMod = new Map<number | string, ModGroup>();
+      for (const mf of rev.modFiles) {
+        const modId = mf.file?.mod?.modId;
+        const modName = mf.file?.mod?.name ?? mf.file?.name ?? "(unknown)";
+        const key = modId ?? modName;
+        let group = byMod.get(key);
+        if (!group) {
+          group = { mod: modName, modId, files: [] };
+          byMod.set(key, group);
+        }
+        group.files.push({
+          file: mf.file?.name !== modName ? mf.file?.name : undefined,
+          version: mf.file?.version ?? mf.version,
+          optional: mf.optional || undefined,
+        });
+      }
+      const groups = [...byMod.values()].sort((a, b) => a.mod.localeCompare(b.mod));
+      modList = groups.slice(modListOffset, modListOffset + MOD_LIST_CAP);
+      if (modListOffset > 0 || groups.length > modListOffset + MOD_LIST_CAP) {
+        modListNote =
+          `Showing mods ${modListOffset + 1}–${modListOffset + modList.length} of ` +
+          `${groups.length} unique mods (${rev.modFiles.length} files total); ` +
+          `use modListOffset to page`;
       }
       delete rev.modFiles;
     }
