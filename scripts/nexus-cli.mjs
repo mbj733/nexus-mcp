@@ -3,7 +3,7 @@
  * nexus-cli — standalone Nexus Mods automation (no Claude Code needed)
  *
  * Usage:
- *   node nexus-cli.mjs login              # log in via Chrome, save cookies
+ *   node nexus-cli.mjs login              # log in via browser, save cookies
  *   node nexus-cli.mjs status             # check if logged in
  *   node nexus-cli.mjs games [query]      # search games
  *   node nexus-cli.mjs search <game> <query>  # search mods
@@ -12,11 +12,9 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { homedir } from "node:os";
-import { createInterface } from "node:readline";
+import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
 import { spawn } from "node:child_process";
-import { tmpdir } from "node:os";
 
 const COOKIES_FILE = join(homedir(), ".nexus-mcp-cookies.json");
 const GQL = "https://api.nexusmods.com/v2/graphql";
@@ -39,23 +37,26 @@ function cookieString(cookies) {
 }
 
 async function login() {
-  const CHROME_CANDIDATES = [
-    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-    join(process.env.LOCALAPPDATA || "", "Google\\Chrome\\Application\\chrome.exe"),
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    "/usr/bin/google-chrome",
-    "/usr/bin/chromium-browser",
+  const BROWSERS = [
+    { name: "Edge", path: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe" },
+    { name: "Edge", path: "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe" },
+    { name: "Chrome", path: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" },
+    { name: "Chrome", path: "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe" },
+    { name: "Chrome", path: join(process.env.LOCALAPPDATA || "", "Google\\Chrome\\Application\\chrome.exe") },
+    { name: "Chrome", path: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" },
+    { name: "Chrome", path: "/usr/bin/google-chrome" },
+    { name: "Chromium", path: "/usr/bin/chromium-browser" },
   ];
 
-  const chromePath = CHROME_CANDIDATES.find((p) => existsSync(p));
-  if (!chromePath) { console.error("Chrome not found"); process.exit(1); }
+  const browser = BROWSERS.find((b) => existsSync(b.path));
+  if (!browser) { console.error("No supported browser found (Edge/Chrome)"); process.exit(1); }
+  console.log(`Using ${browser.name}...`);
 
-  const profileDir = join(tmpdir(), "nexus-cli-chrome");
+  const profileDir = join(tmpdir(), "nexus-cli-browser");
   mkdirSync(profileDir, { recursive: true });
 
-  console.log("Launching Chrome...");
-  const proc = spawn(chromePath, [
+  console.log("Launching browser...");
+  const proc = spawn(browser.path, [
     "--remote-debugging-port=9222",
     `--user-data-dir=${profileDir}`,
     "--no-first-run",
@@ -64,55 +65,60 @@ async function login() {
   ], { stdio: "ignore", detached: true });
   proc.unref();
 
-  await sleep(3000);
+  await sleep(4000);
 
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  console.log("\nLog in at nexusmods.com, then press Enter...");
-  await new Promise((r) => rl.question("", r));
-  rl.close();
+  console.log("\nLog in at nexusmods.com in the browser window...");
+  console.log("   (auto-detect, max 5 min)");
 
-  try {
-    const cookies = await extractCookies();
-    if (!cookies?.length) throw new Error("No cookies found");
-    const names = new Set(cookies.map((c) => c.name));
-    if (!names.has("nexusmods_session") && !names.has("nexusmods_session_refresh")) {
-      throw new Error("Session cookie not found — did you log in?");
-    }
-    saveCookies(cookies);
-    console.log(`\nSaved ${cookies.length} cookies to ${COOKIES_FILE}`);
-    return cookies;
-  } catch (e) {
-    console.error("\n", e.message);
-    process.exit(1);
-  } finally {
-    try { process.kill(-proc.pid); } catch {}
+  let cookies = null;
+  for (let i = 0; i < 150; i++) {
+    await sleep(2000);
+    try {
+      const all = await extractAllCookies();
+      const nexus = all.filter(c => c.domain.includes("nexusmods"));
+      const names = new Set(nexus.map(c => c.name));
+      if (names.has("nexusmods_session") || names.has("nexusmods_session_refresh")) {
+        cookies = nexus;
+        break;
+      }
+    } catch {}
+    if (i % 15 === 14) process.stderr.write(` ${Math.round((i+1)*2/60)}min`);
   }
+
+  try { process.kill(-proc.pid); } catch {}
+
+  if (!cookies) { console.error("\nLogin timed out"); process.exit(1); }
+  saveCookies(cookies);
+  console.log(`\nSaved ${cookies.length} cookies to ${COOKIES_FILE}`);
+  return cookies;
 }
 
-async function extractCookies() {
+async function extractAllCookies() {
   const targets = await (await fetch("http://localhost:9222/json")).json();
-  const page = targets.find((t) => t.type === "page" && t.url.includes("nexusmods"));
-  if (!page) throw new Error("No nexusmods tab found");
-
+  const page = targets.find((t) => t.type === "page");
+  if (!page) throw new Error("No page found");
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(page.webSocketDebuggerUrl);
     ws.onopen = () => ws.send(JSON.stringify({ id: 1, method: "Network.getAllCookies" }));
     ws.onmessage = (e) => {
       const msg = JSON.parse(e.data);
-      if (msg.id === 1) {
-        ws.close();
-        resolve((msg.result?.cookies || []).filter((c) => c.domain.includes("nexusmods")));
-      }
+      if (msg.id === 1) { ws.close(); resolve(msg.result?.cookies || []); }
     };
     ws.onerror = () => reject(new Error("WebSocket error"));
-    setTimeout(() => reject(new Error("Timeout")), 10000);
+    setTimeout(() => reject(new Error("Timeout")), 8000);
   });
 }
 
 async function gql(query, vars = {}) {
   const res = await fetch(GQL, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "User-Agent": UA },
+    headers: {
+      "Content-Type": "application/json",
+      "Application-Name": "nexus-cli",
+      "Application-Version": "1.0",
+      "Accept": "application/json",
+      "User-Agent": UA,
+    },
     body: JSON.stringify({ query, variables: vars }),
   });
   const body = await res.json();
@@ -218,7 +224,7 @@ async function main() {
       const cookies = loadCookies();
       if (!cookies) { console.log("Not logged in. Run: node nexus-cli.mjs login"); break; }
       const valid = await checkSession(cookies);
-      console.log(valid ? "Session valid" : "Session expired. Run: node nexus-cli.mjs login");
+      console.log(valid ? "✅ Session valid" : "❌ Session expired. Run: node nexus-cli.mjs login");
       break;
     }
 
@@ -249,7 +255,7 @@ async function main() {
             totalCount nodes { modId name version summary downloads endorsements }
           }
         }`,
-        { f: { name: [{ value: `*${query}*`, op: "WILDCARD" }], gameDomainName: [{ value: game, op: "EQUALS" }] }, c: 20 },
+        { f: { nameStemmed: [{ value: query, op: "MATCHES" }], gameDomainName: [{ value: game, op: "EQUALS" }] }, c: 20 },
       );
       console.log(`Found ${data.mods.totalCount} mods:\n`);
       for (const m of data.mods.nodes) {
@@ -314,7 +320,7 @@ async function main() {
       const fileName = decodeURIComponent(new URL(cdnUrl).pathname.split("/").pop());
       console.log(`Downloading ${fileName}...`);
       const dest = await downloadFile(cdnUrl, dir, fileName);
-      console.log(`\nSaved to ${dest}`);
+      console.log(`\n✅ Saved to ${dest}`);
       break;
     }
 
@@ -322,7 +328,7 @@ async function main() {
       console.log(`nexus-cli — standalone Nexus Mods automation
 
 Usage:
-  node nexus-cli.mjs login                      Log in via Chrome (saves cookies)
+  node nexus-cli.mjs login                      Log in via browser (saves cookies)
   node nexus-cli.mjs status                     Check login status
   node nexus-cli.mjs games [query]              Search games
   node nexus-cli.mjs search <game> <query>      Search mods
