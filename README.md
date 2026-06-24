@@ -56,36 +56,44 @@ Or in Claude Desktop's `claude_desktop_config.json`:
 
 ## Authentication
 
-Two options:
+Three options:
 
-### Option A: Personal API Key (recommended)
+### Option A: Personal API Key
 
-`NEXUS_MODS_API_KEY` — generated at [nexusmods.com/users/myaccount?tab=api](https://www.nexusmods.com/users/myaccount?tab=api).
-When set, it is sent as the `APIKEY` header and unlocks viewer-relative fields
-(`viewerEndorsed`, `viewerTracked`, `viewerDownloaded`) on `get_mod`, plus
-enables the v1 REST download API.
-See `docs/adr/0001-personal-api-key-auth.md` for why this server skips OAuth.
+`NEXUS_MODS_API_KEY` — from [nexusmods.com/users/myaccount?tab=api](https://www.nexusmods.com/users/myaccount?tab=api).
+Enables v1 REST download API + viewer-relative GraphQL fields.
 
-### Option B: Browser Cookies (fallback for download)
+### Option B: Browser Cookies (no API key needed)
 
-If you don't have an API key, use browser cookies instead. Run the helper script:
+Run the helper script once to log in:
 
 ```sh
 node scripts/login.mjs
 ```
 
-This launches Chrome → you log in manually → it extracts the cookies and prints
-the `NEXUS_COOKIES` value. Paste that into your MCP config.
+This launches Chrome, you log in, cookies are saved to `~/.nexus-mcp-cookies.json`.
+The MCP server reads this file automatically.
 
-Both `NEXUS_MODS_API_KEY` and `NEXUS_COOKIES` can be set together — the server
-tries the API key first, then falls back to cookies for downloads.
+### Option C: Standalone CLI (no Claude Code needed)
+
+The `nexus-cli.mjs` tool works completely independently:
+
+```sh
+node scripts/nexus-cli.mjs login                           # one-time login
+node scripts/nexus-cli.mjs search skyrim "unofficial patch" # search mods
+node scripts/nexus-cli.mjs download skyrim 266              # download mod
+node scripts/nexus-cli.mjs download baldursgate3 1234 --dir ./mods
+```
+
+Cookies stored at `~/.nexus-mcp-cookies.json`, auto-refreshed when expired.
 
 ## Development
 
 ```sh
 npm run dev               # run from source via tsx
-node scripts/smoke.mjs    # end-to-end smoke test against the live API (needs build)
+node scripts/smoke.mjs    # end-to-end smoke test (needs build)
 node scripts/login.mjs    # extract Nexus Mods cookies from Chrome
+node scripts/nexus-cli.mjs login  # standalone login
 ```
 
 Domain terminology lives in `CONTEXT.md`.
