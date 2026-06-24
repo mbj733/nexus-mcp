@@ -26,10 +26,16 @@ npm install
 npm run build
 ```
 
-Register with Claude Code:
+Register with Claude Code (local checkout):
 
 ```sh
-claude mcp add nexus-mods -e NEXUS_MODS_API_KEY=<your key> -- node /home/matthew/src/nexus-mcp/dist/index.js
+claude mcp add nexus-mods -e NEXUS_MODS_API_KEY=<your key> -- node dist/index.js
+```
+
+Or run directly via npx (no checkout needed — the repo is public):
+
+```sh
+claude mcp add nexus-mods -e NEXUS_MODS_API_KEY=<your key> -- npx github:mbj733/nexus-mcp
 ```
 
 Or in Claude Desktop's `claude_desktop_config.json`:
@@ -39,7 +45,7 @@ Or in Claude Desktop's `claude_desktop_config.json`:
   "mcpServers": {
     "nexus-mods": {
       "command": "node",
-      "args": ["/home/matthew/src/nexus-mcp/dist/index.js"],
+      "args": ["dist/index.js"],
       "env": { "NEXUS_MODS_API_KEY": "<your key>" }
     }
   }

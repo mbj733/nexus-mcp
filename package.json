@@ -2,19 +2,30 @@
   "name": "nexus-mcp",
   "version": "0.1.0",
   "description": "MCP server for Nexus Mods discovery (v2 GraphQL API)",
-  "main": "dist/index.js",
-  "directories": {
-    "doc": "docs"
-  },
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "tsc",
-    "dev": "tsx src/index.ts"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "type": "module",
+  "bin": {
+    "nexus-mcp": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CONTEXT.md",
+    "docs"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "keywords": [
+    "nexusmods",
+    "mcp",
+    "model-context-protocol",
+    "modding",
+    "gaming"
+  ],
+  "author": "fr1pp",
+  "license": "ISC",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^4.4.3"
