@@ -12,7 +12,6 @@ function jsonResult(data) {
 const gameDomainParam = z
     .string()
     .describe('Game domain name as used in nexusmods.com URLs, e.g. "skyrimspecialedition", "newvegas". Use search_games to resolve a game title to its domain.');
-// ---------------------------------------------------------------- search_mods
 const MOD_SORTS = {
     endorsements: { endorsements: { direction: "DESC" } },
     downloads: { downloads: { direction: "DESC" } },
@@ -37,33 +36,38 @@ server.registerTool("search_mods", {
         offset: z.number().int().min(0).default(0),
         count: z.number().int().min(1).max(50).default(10),
     },
-}, async ({ query, gameDomain, author, tag, modIds, sortBy, offset, count }) => {
+}, async ({ query, gameDomain, author, tag, modIds, sortBy, offset, count })=>{
     let filter = {};
     if (modIds?.length) {
         if (!gameDomain) {
             return jsonResult({ error: "modIds requires gameDomain to be set" });
         }
-        // The API ANDs multiple values of one filter field, so a batch lookup
-        // needs explicit OR branches, each carrying the (required) gameId.
         const gameId = await resolveGameId(gameDomain);
         filter = {
             op: "OR",
-            filter: modIds.map((id) => ({
-                modId: [{ value: String(id), op: "EQUALS" }],
-                gameId: [{ value: String(gameId), op: "EQUALS" }],
-            })),
+            filter: modIds.map((id)=>({
+                    modId: [
+                        { value: String(id), op: "EQUALS" }
+                    ],
+                    gameId: [
+                        { value: String(gameId), op: "EQUALS" }
+                    ],
+                })),
         };
         count = Math.max(count, modIds.length);
-    }
-    else {
-        if (query)
-            filter.name = [{ value: query, op: "WILDCARD" }];
-        if (gameDomain)
-            filter.gameDomainName = [{ value: gameDomain, op: "EQUALS" }];
-        if (author)
-            filter.author = [{ value: author, op: "EQUALS" }];
-        if (tag)
-            filter.tag = [{ value: tag, op: "EQUALS" }];
+    } else {
+        if (query) filter.nameStemmed = [
+            { value: query, op: "MATCHES" }
+        ];
+        if (gameDomain) filter.gameDomainName = [
+            { value: gameDomain, op: "EQUALS" }
+        ];
+        if (author) filter.author = [
+            { value: author, op: "EQUALS" }
+        ];
+        if (tag) filter.tag = [
+            { value: tag, op: "EQUALS" }
+        ];
     }
     const data = await gql(`query ($filter: ModsFilter, $sort: [ModsSort!], $offset: Int, $count: Int) {
         mods(filter: $filter, sort: $sort, offset: $offset, count: $count) {
@@ -73,350 +77,13 @@ server.registerTool("search_mods", {
             game { domainName } endorsements downloads updatedAt adultContent
           }
         }
-      }`, { filter, sort: [MOD_SORTS[sortBy]], offset, count });
+      }`, {
+        filter,
+        sort: [
+            MOD_SORTS[sortBy]
+        ],
+        offset,
+        count
+    });
     return jsonResult(data.mods);
 });
-// -------------------------------------------------------------------- get_mod
-server.registerTool("get_mod", {
-    title: "Get mod details",
-    description: "Get full details for one mod: description, requirements, tags, stats. Identify the mod by game domain + mod ID (both appear in nexusmods.com URLs and search_mods results).",
-    inputSchema: {
-        gameDomain: gameDomainParam,
-        modId: z.number().int().describe("Numeric mod ID within the game"),
-        maxDescriptionChars: z.number().int().min(0).default(8000),
-    },
-}, async ({ gameDomain, modId, maxDescriptionChars }) => {
-    const gameId = await resolveGameId(gameDomain);
-    const viewerFields = hasApiKey ? "viewerEndorsed viewerTracked viewerDownloaded" : "";
-    const data = await gql(`query ($filter: ModsFilter) {
-        mods(filter: $filter, count: 1) {
-          nodes {
-            uid modId name version summary description author uploader { name memberId }
-            game { domainName name id } endorsements downloads fileSize
-            createdAt updatedAt adultContent status pictureUrl
-            tags { name }
-            modRequirements { nexusRequirements { nodes { modName url notes externalRequirement } } }
-            ${viewerFields}
-          }
-        }
-      }`, {
-        filter: {
-            modId: [{ value: String(modId), op: "EQUALS" }],
-            gameId: [{ value: String(gameId), op: "EQUALS" }],
-        },
-    });
-    const mod = data.mods.nodes[0];
-    if (!mod)
-        return jsonResult({ error: `Mod ${modId} not found for game "${gameDomain}"` });
-    if (typeof mod.description === "string") {
-        mod.description = bbcodeToText(mod.description, maxDescriptionChars);
-    }
-    const reqs = mod.modRequirements;
-    mod.requirements = reqs?.nexusRequirements?.nodes ?? [];
-    delete mod.modRequirements;
-    mod.url = `https://www.nexusmods.com/${gameDomain}/mods/${modId}`;
-    return jsonResult(mod);
-});
-// -------------------------------------------------------------- get_mod_files
-server.registerTool("get_mod_files", {
-    title: "List mod files",
-    description: "List the downloadable files of a mod (main/optional/old versions) with sizes, dates, descriptions, and changelogs.",
-    inputSchema: {
-        gameDomain: gameDomainParam,
-        modId: z.number().int().describe("Numeric mod ID within the game"),
-        includeOldVersions: z.boolean().default(false).describe("Include OLD_VERSION and ARCHIVED files"),
-    },
-}, async ({ gameDomain, modId, includeOldVersions }) => {
-    const gameId = await resolveGameId(gameDomain);
-    const data = await gql(`query ($modId: ID!, $gameId: ID!) {
-        modFiles(modId: $modId, gameId: $gameId) {
-          fileId name version category date sizeInBytes description
-          changelogText totalDownloads primary
-        }
-      }`, { modId: String(modId), gameId: String(gameId) });
-    const files = data.modFiles
-        .filter((f) => includeOldVersions || !["OLD_VERSION", "ARCHIVED", "REMOVED"].includes(f.category))
-        .map((f) => ({
-        fileId: f.fileId,
-        name: f.name,
-        version: f.version,
-        category: f.category,
-        date: isoDate(f.date),
-        sizeInBytes: f.sizeInBytes,
-        primary: f.primary === 1,
-        totalDownloads: f.totalDownloads,
-        description: f.description ? bbcodeToText(f.description, 1000) : null,
-        changelog: f.changelogText.length ? f.changelogText : undefined,
-    }));
-    return jsonResult({ count: files.length, files });
-});
-// --------------------------------------------------------- search_collections
-const COLLECTION_SORTS = {
-    endorsements: { endorsements: { direction: "DESC" } },
-    downloads: { downloads: { direction: "DESC" } },
-    rating: { rating: { direction: "DESC" } },
-    updatedAt: { updatedAt: { direction: "DESC" } },
-    relevance: { relevance: { direction: "DESC" } },
-};
-server.registerTool("search_collections", {
-    title: "Search collections",
-    description: "Search Nexus Mods collections (curated mod lists) by text and game. Use get_collection with a result's slug to see its mod list.",
-    inputSchema: {
-        query: z.string().optional().describe("Full-text search over collection name/summary"),
-        gameDomain: gameDomainParam.optional(),
-        sortBy: z.enum(["endorsements", "downloads", "rating", "updatedAt", "relevance"]).default("endorsements"),
-        offset: z.number().int().min(0).default(0),
-        count: z.number().int().min(1).max(50).default(10),
-    },
-}, async ({ query, gameDomain, sortBy, offset, count }) => {
-    const filter = {};
-    if (query)
-        filter.generalSearch = [{ value: query, op: "WILDCARD" }];
-    if (gameDomain)
-        filter.gameDomain = [{ value: gameDomain, op: "EQUALS" }];
-    const data = await gql(`query ($filter: CollectionsSearchFilter, $sort: [CollectionsSearchSort!], $offset: Int, $count: Int) {
-        collectionsV2(filter: $filter, sort: $sort, offset: $offset, count: $count) {
-          totalCount
-          nodes {
-            name slug summary endorsements totalDownloads overallRating overallRatingCount
-            game { domainName } user { name } category { name } updatedAt
-            latestPublishedRevision { revisionNumber modCount adultContent }
-          }
-        }
-      }`, { filter, sort: [COLLECTION_SORTS[sortBy]], offset, count });
-    return jsonResult(data.collectionsV2);
-});
-// ------------------------------------------------------------- get_collection
-const MOD_LIST_CAP = 300;
-server.registerTool("get_collection", {
-    title: "Get collection details",
-    description: "Get a collection's metadata and full mod list by slug (from search_collections or a nexusmods.com/collections URL). Optionally a specific revision number.",
-    inputSchema: {
-        slug: z.string().describe("Collection slug"),
-        revision: z.number().int().optional().describe("Revision number; defaults to latest published"),
-        includeModList: z.boolean().default(true),
-        modListOffset: z
-            .number()
-            .int()
-            .min(0)
-            .default(0)
-            .describe("Skip this many mods (alphabetical order) when the list is truncated"),
-    },
-}, async ({ slug, revision, includeModList, modListOffset }) => {
-    const modFilesSel = includeModList
-        ? `modFiles { optional version file { name version modId mod { modId name } } }`
-        : "";
-    const revisionSel = `
-      revisionNumber adultContent modCount createdAt gameVersions { reference }
-      installationInfo ${modFilesSel}`;
-    const data = await gql(`query ($slug: String) {
-        collection(slug: $slug, viewAdultContent: true) {
-          name slug summary description endorsements totalDownloads
-          overallRating overallRatingCount createdAt updatedAt
-          game { domainName name } user { name } category { name } tags { name }
-          ${revision === undefined ? `latestPublishedRevision { ${revisionSel} }` : ""}
-        }
-      }`, { slug });
-    if (!data.collection)
-        return jsonResult({ error: `Collection "${slug}" not found` });
-    const col = data.collection;
-    let rev = col.latestPublishedRevision;
-    delete col.latestPublishedRevision;
-    if (revision !== undefined) {
-        const revData = await gql(`query ($slug: String, $revision: Int) {
-          collectionRevision(slug: $slug, revision: $revision, viewAdultContent: true) { ${revisionSel} }
-        }`, { slug, revision });
-        if (!revData.collectionRevision) {
-            return jsonResult({ error: `Revision ${revision} of collection "${slug}" not found` });
-        }
-        rev = revData.collectionRevision;
-    }
-    if (typeof col.description === "string")
-        col.description = bbcodeToText(col.description, 4000);
-    if (rev && typeof rev.installationInfo === "string") {
-        rev.installationInfo = bbcodeToText(rev.installationInfo, 2000);
-    }
-    let modList;
-    let modListNote;
-    if (rev?.modFiles) {
-        const byMod = new Map();
-        for (const mf of rev.modFiles) {
-            const modId = mf.file?.mod?.modId;
-            const modName = mf.file?.mod?.name ?? mf.file?.name ?? "(unknown)";
-            const key = modId ?? modName;
-            let group = byMod.get(key);
-            if (!group) {
-                group = { mod: modName, modId, files: [] };
-                byMod.set(key, group);
-            }
-            group.files.push({
-                file: mf.file?.name !== modName ? mf.file?.name : undefined,
-                version: mf.file?.version ?? mf.version,
-                optional: mf.optional || undefined,
-            });
-        }
-        const groups = [...byMod.values()].sort((a, b) => a.mod.localeCompare(b.mod));
-        modList = groups.slice(modListOffset, modListOffset + MOD_LIST_CAP);
-        if (modListOffset > 0 || groups.length > modListOffset + MOD_LIST_CAP) {
-            modListNote =
-                `Showing mods ${modListOffset + 1}–${modListOffset + modList.length} of ` +
-                    `${groups.length} unique mods (${rev.modFiles.length} files total); ` +
-                    `use modListOffset to page`;
-        }
-        delete rev.modFiles;
-    }
-    col.url =
-        `https://www.nexusmods.com/games/${col.game.domainName}/collections/${slug}`;
-    return jsonResult({ ...col, revision: rev, modListNote, modList });
-});
-// ---------------------------------------------------------------------- games
-server.registerTool("search_games", {
-    title: "Search games",
-    description: "Find games on Nexus Mods by name; returns their domain names (needed by the other tools), mod counts, and collection counts. Without a query, returns the most-modded games.",
-    inputSchema: {
-        query: z.string().optional().describe("Game name to match (substring)"),
-        count: z.number().int().min(1).max(50).default(10),
-    },
-}, async ({ query, count }) => {
-    const filter = query ? { name: [{ value: query, op: "WILDCARD" }] } : undefined;
-    const data = await gql(`query ($filter: GamesSearchFilter, $count: Int) {
-        games(filter: $filter, sort: [{ mods: { direction: DESC } }], count: $count) {
-          totalCount
-          nodes { id name domainName modCount collectionCount genre }
-        }
-      }`, { filter, count });
-    return jsonResult(data.games);
-});
-// ------------------------------------------------------------------- get_user
-server.registerTool("get_user", {
-    title: "Get user profile",
-    description: "Look up a Nexus Mods user by exact username; returns their profile and most-endorsed mods.",
-    inputSchema: {
-        name: z.string().describe("Exact username"),
-        modCount: z.number().int().min(0).max(50).default(10).describe("How many of their top mods to include"),
-    },
-}, async ({ name, modCount }) => {
-    const data = await gql(`query ($name: String!) {
-        userByName(name: $name) {
-          memberId name avatar about country joined kudos posts
-          modCount collectionCount recognizedAuthor uniqueModDownloads
-        }
-      }`, { name });
-    if (!data.userByName)
-        return jsonResult({ error: `User "${name}" not found` });
-    const user = data.userByName;
-    let topMods = [];
-    if (modCount > 0) {
-        const mods = await gql(`query ($filter: ModsFilter, $count: Int) {
-          mods(filter: $filter, sort: [{ endorsements: { direction: DESC } }], count: $count) {
-            nodes { modId name version summary game { domainName } endorsements downloads updatedAt }
-          }
-        }`, { filter: { uploaderId: [{ value: String(user.memberId), op: "EQUALS" }] }, count: modCount });
-        topMods = mods.mods.nodes;
-    }
-    return jsonResult({ ...user, topMods });
-});
-// ------------------------------------------------------------ get_download_url
-server.registerTool("get_download_url", {
-    title: "Get mod download URL",
-    description: "Get a pre-signed CDN download URL for a mod file. Requires NEXUS_MODS_API_KEY (personal API key from nexusmods.com/users/myaccount?tab=api). The URL is temporary and expires. To actually download the file, use download_mod instead. Note: free Nexus Mods accounts are rate-limited; Premium recommended for bulk downloads.",
-    inputSchema: {
-        gameDomain: gameDomainParam,
-        modId: z.number().int().describe("Numeric mod ID"),
-        fileId: z.number().int().optional().describe("Specific file ID. If omitted, the primary (main) file is used."),
-    },
-}, async ({ gameDomain, modId, fileId }) => {
-    const gameId = await resolveGameId(gameDomain);
-    let fid = fileId;
-    if (fid === undefined) {
-        const data = await gql(`query ($modId: ID!, $gameId: ID!) {
-          modFiles(modId: $modId, gameId: $gameId) { fileId primary }
-        }`, { modId: String(modId), gameId: String(gameId) });
-        const primary = data.modFiles.find((f) => f.primary === 1);
-        if (!primary) {
-            return jsonResult({
-                error: "No primary file found. Specify fileId explicitly — use get_mod_files to list them.",
-            });
-        }
-        fid = primary.fileId;
-    }
-    const link = await getDownloadLink(gameDomain, modId, fid, gameId);
-    return jsonResult({
-        url: link.url,
-        fileName: link.fileName,
-        size: link.size,
-        note: "This URL is temporary (typically expires in minutes). Use download_mod to download immediately.",
-    });
-});
-// ---------------------------------------------------------------- download_mod
-server.registerTool("download_mod", {
-    title: "Download a mod file",
-    description: "Download a mod file from Nexus Mods to your local disk. Requires NEXUS_MODS_API_KEY. By default downloads the primary file of the mod. Saves to the directory specified by DOWNLOAD_DIR env var, or the current working directory. Reports progress. Note: free Nexus Mods accounts have download speed caps (~2 MB/s); Premium recommended for bulk downloads.",
-    inputSchema: {
-        gameDomain: gameDomainParam,
-        modId: z.number().int().describe("Numeric mod ID"),
-        fileId: z.number().int().optional().describe("Specific file ID. If omitted, the primary (main) file is used."),
-        destDir: z.string().optional().describe("Directory to save the file. Defaults to DOWNLOAD_DIR env var or current directory."),
-    },
-}, async ({ gameDomain, modId, fileId, destDir }) => {
-    const gameId = await resolveGameId(gameDomain);
-    let fid = fileId;
-    let fileNameHint;
-    if (fid === undefined) {
-        const data = await gql(`query ($modId: ID!, $gameId: ID!) {
-          modFiles(modId: $modId, gameId: $gameId) { fileId primary name }
-        }`, { modId: String(modId), gameId: String(gameId) });
-        const primary = data.modFiles.find((f) => f.primary === 1);
-        if (!primary) {
-            return jsonResult({
-                error: "No primary file found. Specify fileId explicitly — use get_mod_files to list them.",
-            });
-        }
-        fid = primary.fileId;
-        fileNameHint = primary.name;
-    }
-    const dir = destDir || process.env.DOWNLOAD_DIR || process.cwd();
-    const link = await getDownloadLink(gameDomain, modId, fid, gameId);
-    const fileName = fileNameHint
-        ? `${fileNameHint}-${link.fileName}`
-        : link.fileName;
-    let lastReport = 0;
-    const savedPath = await downloadToFile(link.url, dir, fileName, (downloaded, total) => {
-        const now = Date.now();
-        if (now - lastReport < 2000)
-            return;
-        lastReport = now;
-        const pct = total > 0 ? Math.round((downloaded / total) * 100) : -1;
-        const mb = (downloaded / 1024 / 1024).toFixed(1);
-        const totalMb = total > 0 ? (total / 1024 / 1024).toFixed(1) : "?";
-        console.error(`nexus-mcp: download ${pct > 0 ? pct + "%" : ""} ${mb}/${totalMb} MB`);
-    });
-    return jsonResult({
-        savedTo: savedPath,
-        fileName: link.fileName,
-        size: link.size,
-        from: `${gameDomain}/mods/${modId}/files/${fid}`,
-    });
-});
-// ---------------------------------------------------------------- run_graphql
-server.registerTool("run_graphql", {
-    title: "Run GraphQL query",
-    description: "Escape hatch: run an arbitrary read-only GraphQL query against the Nexus Mods v2 API (api.nexusmods.com/v2/graphql). Mutations are rejected. Use introspection (__schema/__type) to discover fields not covered by the other tools. Keep selections small — responses are returned verbatim. Filter semantics: multiple values for one filter field AND together; for OR, nest sub-filters under { op: OR, filter: [...] } with each branch carrying all required fields (e.g. gameId alongside modId).",
-    inputSchema: {
-        query: z.string().describe("GraphQL query document (no mutations)"),
-        variables: z.record(z.string(), z.unknown()).optional(),
-    },
-}, async ({ query, variables }) => {
-    const withoutStringsAndComments = query
-        .replace(/"(?:[^"\\]|\\.)*"/g, '""')
-        .replace(/#[^\n]*/g, "");
-    if (/\bmutation\b/i.test(withoutStringsAndComments)) {
-        return jsonResult({ error: "Mutations are not allowed; this server is read-only." });
-    }
-    const data = await gql(query, variables ?? {});
-    return jsonResult(data);
-});
-// ----------------------------------------------------------------------- main
-const transport = new StdioServerTransport();
-await server.connect(transport);
-console.error(`nexus-mcp ready (auth: ${hasApiKey ? "personal API key" : "anonymous — set NEXUS_MODS_API_KEY for viewer data and downloads"})`);
