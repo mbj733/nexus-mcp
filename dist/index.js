@@ -2,7 +2,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { gql, resolveGameId, isoDate } from "./nexus.js";
+import { gql, resolveGameId, isoDate, getDownloadLink, downloadToFile } from "./nexus.js";
 import { bbcodeToText } from "./bbcode.js";
 const server = new McpServer({ name: "nexus-mods", version: "0.1.0" });
 const hasApiKey = Boolean(process.env.NEXUS_MODS_API_KEY?.trim());
@@ -316,6 +316,88 @@ server.registerTool("get_user", {
     }
     return jsonResult({ ...user, topMods });
 });
+// ------------------------------------------------------------ get_download_url
+server.registerTool("get_download_url", {
+    title: "Get mod download URL",
+    description: "Get a pre-signed CDN download URL for a mod file. Requires NEXUS_MODS_API_KEY (personal API key from nexusmods.com/users/myaccount?tab=api). The URL is temporary and expires. To actually download the file, use download_mod instead. Note: free Nexus Mods accounts are rate-limited; Premium recommended for bulk downloads.",
+    inputSchema: {
+        gameDomain: gameDomainParam,
+        modId: z.number().int().describe("Numeric mod ID"),
+        fileId: z.number().int().optional().describe("Specific file ID. If omitted, the primary (main) file is used."),
+    },
+}, async ({ gameDomain, modId, fileId }) => {
+    let fid = fileId;
+    if (fid === undefined) {
+        const gameId = await resolveGameId(gameDomain);
+        const data = await gql(`query ($modId: ID!, $gameId: ID!) {
+          modFiles(modId: $modId, gameId: $gameId) { fileId primary }
+        }`, { modId: String(modId), gameId: String(gameId) });
+        const primary = data.modFiles.find((f) => f.primary === 1);
+        if (!primary) {
+            return jsonResult({
+                error: "No primary file found. Specify fileId explicitly — use get_mod_files to list them.",
+            });
+        }
+        fid = primary.fileId;
+    }
+    const link = await getDownloadLink(gameDomain, modId, fid);
+    return jsonResult({
+        url: link.url,
+        fileName: link.fileName,
+        size: link.size,
+        note: "This URL is temporary (typically expires in minutes). Use download_mod to download immediately.",
+    });
+});
+// ---------------------------------------------------------------- download_mod
+server.registerTool("download_mod", {
+    title: "Download a mod file",
+    description: "Download a mod file from Nexus Mods to your local disk. Requires NEXUS_MODS_API_KEY. By default downloads the primary file of the mod. Saves to the directory specified by DOWNLOAD_DIR env var, or the current working directory. Reports progress. Note: free Nexus Mods accounts have download speed caps (~2 MB/s); Premium recommended for bulk downloads.",
+    inputSchema: {
+        gameDomain: gameDomainParam,
+        modId: z.number().int().describe("Numeric mod ID"),
+        fileId: z.number().int().optional().describe("Specific file ID. If omitted, the primary (main) file is used."),
+        destDir: z.string().optional().describe("Directory to save the file. Defaults to DOWNLOAD_DIR env var or current directory."),
+    },
+}, async ({ gameDomain, modId, fileId, destDir }) => {
+    let fid = fileId;
+    let fileNameHint;
+    if (fid === undefined) {
+        const gameId = await resolveGameId(gameDomain);
+        const data = await gql(`query ($modId: ID!, $gameId: ID!) {
+          modFiles(modId: $modId, gameId: $gameId) { fileId primary name }
+        }`, { modId: String(modId), gameId: String(gameId) });
+        const primary = data.modFiles.find((f) => f.primary === 1);
+        if (!primary) {
+            return jsonResult({
+                error: "No primary file found. Specify fileId explicitly — use get_mod_files to list them.",
+            });
+        }
+        fid = primary.fileId;
+        fileNameHint = primary.name;
+    }
+    const dir = destDir || process.env.DOWNLOAD_DIR || process.cwd();
+    const link = await getDownloadLink(gameDomain, modId, fid);
+    const fileName = fileNameHint
+        ? `${fileNameHint}-${link.fileName}`
+        : link.fileName;
+    let lastReport = 0;
+    const savedPath = await downloadToFile(link.url, dir, fileName, (downloaded, total) => {
+        const now = Date.now();
+        if (now - lastReport < 2000)
+            return;
+        lastReport = now;
+        const pct = total > 0 ? Math.round((downloaded / total) * 100) : -1;
+        const mb = (downloaded / 1024 / 1024).toFixed(1);
+        const totalMb = total > 0 ? (total / 1024 / 1024).toFixed(1) : "?";
+        console.error(`nexus-mcp: download ${pct > 0 ? pct + "%" : ""} ${mb}/${totalMb} MB`);
+    });
+    return jsonResult({
+        savedTo: savedPath,
+        fileName: link.fileName,
+        size: link.size,
+        from: `${gameDomain}/mods/${modId}/files/${fid}`,
+    });
+});
 // ---------------------------------------------------------------- run_graphql
 server.registerTool("run_graphql", {
     title: "Run GraphQL query",
@@ -337,4 +419,4 @@ server.registerTool("run_graphql", {
 // ----------------------------------------------------------------------- main
 const transport = new StdioServerTransport();
 await server.connect(transport);
-console.error(`nexus-mcp ready (auth: ${hasApiKey ? "personal API key" : "anonymous — set NEXUS_MODS_API_KEY for viewer data"})`);
+console.error(`nexus-mcp ready (auth: ${hasApiKey ? "personal API key" : "anonymous — set NEXUS_MODS_API_KEY for viewer data and downloads"})`);

@@ -12,6 +12,8 @@ Read-only by design.
 | `search_mods` | Search mods by name/game/author/tag, sorted by endorsements etc. |
 | `get_mod` | Full mod details: description, requirements, tags, stats |
 | `get_mod_files` | A mod's downloadable files with versions and changelogs |
+| `get_download_url` | Get a pre-signed CDN download URL (requires API key) |
+| `download_mod` | Download a mod file to disk (requires API key) |
 | `search_collections` | Search curated mod lists |
 | `get_collection` | Collection metadata + full mod list (by slug, optional revision) |
 | `get_user` | User profile + their most-endorsed mods |
