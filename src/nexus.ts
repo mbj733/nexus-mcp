@@ -1,32 +1,65 @@
 /**
- * Thin client for the Nexus Mods v2 GraphQL API and v1 REST API.
+ * Thin client for the Nexus Mods v2 GraphQL API, v1 REST API, and website scraping.
  *
- * GraphQL endpoint: api.nexusmods.com/v2/graphql (discovery / metadata)
- * REST endpoint:   api.nexusmods.com/v1          (download links)
+ * GraphQL:   api.nexusmods.com/v2/graphql (discovery / metadata)
+ * v1 REST:   api.nexusmods.com/v1         (metadata; download_link may need premium)
+ * Web scrape: www.nexusmods.com           (DownloadPopUp widget → CDN URL; cookies auth)
  *
- * Auth is an optional personal API key sent as the `apikey`
- * header — see docs/adr/0001-personal-api-key-auth.md.
+ * Auth: personal API key as `APIKEY` header for API calls;
+ * browser cookies (NEXUS_COOKIES env var) for web scraping fallback.
  */
 
 const GQL_ENDPOINT = "https://api.nexusmods.com/v2/graphql";
 const V1_BASE = "https://api.nexusmods.com/v1";
-const USER_AGENT = "nexus-mcp/0.2.0 (local MCP server)";
+const WEB_BASE = "https://www.nexusmods.com";
+const USER_AGENT = "nexus-mcp/0.2.1 (local MCP server)";
+const APP_NAME = "nexus-mcp";
+const APP_VERSION = "0.2.1";
 
 export class NexusError extends Error {}
 
 // ---- HTTP helpers ----------------------------------------------------------
 
-function authHeaders(): Record<string, string> {
-  const apiKey = process.env.NEXUS_MODS_API_KEY?.trim();
-  if (!apiKey) throw new NexusError("NEXUS_MODS_API_KEY is required for this operation");
-  return { apikey: apiKey, "User-Agent": USER_AGENT };
+function apiKey(): string | undefined {
+  return process.env.NEXUS_MODS_API_KEY?.trim() || undefined;
 }
 
-function authHeadersOptional(): Record<string, string> {
-  const h: Record<string, string> = { "User-Agent": USER_AGENT };
-  const apiKey = process.env.NEXUS_MODS_API_KEY?.trim();
-  if (apiKey) h["apikey"] = apiKey;
+function apiHeaders(): Record<string, string> {
+  const key = apiKey();
+  if (!key) throw new NexusError("NEXUS_MODS_API_KEY is required for this operation");
+  return {
+    "APIKEY": key,
+    "Application-Name": APP_NAME,
+    "Application-Version": APP_VERSION,
+    "Protocol-Version": "1.0.0",
+    "Accept": "application/json",
+    "User-Agent": USER_AGENT,
+  };
+}
+
+function apiHeadersOpt(): Record<string, string> {
+  const h: Record<string, string> = {
+    "Application-Name": APP_NAME,
+    "Application-Version": APP_VERSION,
+    "Accept": "application/json",
+    "User-Agent": USER_AGENT,
+  };
+  const key = apiKey();
+  if (key) h["APIKEY"] = key;
   return h;
+}
+
+function cookiesHeader(): string | undefined {
+  const raw = process.env.NEXUS_COOKIES?.trim();
+  if (!raw) return undefined;
+  try {
+    const arr: { name: string; value: string }[] = JSON.parse(raw);
+    return arr.map((c) => `${c.name}=${c.value}`).join("; ");
+  } catch {
+    // Maybe it's already a raw cookie string
+    if (raw.includes("=")) return raw;
+    return undefined;
+  }
 }
 
 // ---- v2 GraphQL ------------------------------------------------------------
@@ -37,7 +70,7 @@ export async function gql<T = unknown>(
 ): Promise<T> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    ...authHeadersOptional(),
+    ...apiHeadersOpt(),
   };
 
   const res = await fetch(GQL_ENDPOINT, {
@@ -46,7 +79,7 @@ export async function gql<T = unknown>(
     body: JSON.stringify({ query, variables }),
   });
   if (!res.ok) {
-    throw new NexusError(`Nexus API HTTP ${res.status}: ${await res.text()}`);
+    throw new NexusError(`Nexus API HTTP ${res.status}: ${(await res.text()).slice(0, 500)}`);
   }
   const body = (await res.json()) as {
     data?: T;
@@ -63,49 +96,120 @@ export async function gql<T = unknown>(
   return body.data;
 }
 
-// ---- v1 REST (download) ----------------------------------------------------
+// ---- Download: CDN URL resolution ------------------------------------------
 
 export interface DownloadLink {
-  /** Pre-signed CDN download URL (temporary, expires) */
   url: string;
-  /** Human-readable file name from Content-Disposition */
   fileName: string;
-  /** File size in bytes (may be 0 if unknown) */
   size: number;
 }
 
 /**
- * Fetch a pre-signed CDN download link from the v1 REST API.
- * Requires NEXUS_MODS_API_KEY (personal API key).
+ * Try to get a CDN download URL. Strategy:
+ * 1. If API key is set, try v1 REST download_link.json with proper headers.
+ * 2. If that fails or no API key, fall back to scraping the website's
+ *    DownloadPopUp widget (requires NEXUS_COOKIES env var with browser cookies).
  */
 export async function getDownloadLink(
   gameDomain: string,
   modId: number,
   fileId: number,
+  gameId: number,
+): Promise<DownloadLink> {
+  // Strategy 1: v1 REST API (requires API key)
+  if (apiKey()) {
+    try {
+      return await getDownloadLinkV1(gameDomain, modId, fileId);
+    } catch (e) {
+      console.error(`nexus-mcp: v1 download_link failed, falling back to web scrape: ${e}`);
+    }
+  }
+
+  // Strategy 2: Web scrape DownloadPopUp (requires cookies)
+  return await getDownloadLinkWeb(gameDomain, modId, fileId, gameId);
+}
+
+/** v1 REST API download_link.json */
+async function getDownloadLinkV1(
+  gameDomain: string,
+  modId: number,
+  fileId: number,
 ): Promise<DownloadLink> {
   const url = `${V1_BASE}/games/${encodeURIComponent(gameDomain)}/mods/${modId}/files/${fileId}/download_link.json`;
-  const res = await fetch(url, { headers: authHeaders() });
+  const res = await fetch(url, { headers: apiHeaders() });
 
   if (!res.ok) {
     const text = await res.text();
-    if (res.status === 401) throw new NexusError("Authentication failed — check NEXUS_MODS_API_KEY");
-    throw new NexusError(`Download link API HTTP ${res.status}: ${text}`);
+    throw new NexusError(`v1 API HTTP ${res.status}: ${text.slice(0, 300)}`);
   }
 
-  // Response is either { uri, ... } or [{ uri, ... }]
   const body = await res.json();
   const item = Array.isArray(body) ? body[0] : body;
   if (!item?.URI && !item?.uri) {
-    throw new NexusError(`Download link API returned unexpected response: ${JSON.stringify(body).slice(0, 300)}`);
+    throw new NexusError(`Unexpected response: ${JSON.stringify(body).slice(0, 300)}`);
   }
 
   const cdnUrl: string = item.URI || item.uri;
-  // Extract filename from URL path
   const urlPath = new URL(cdnUrl).pathname;
   const fileName = decodeURIComponent(urlPath.split("/").pop() ?? "download");
-  const size = item.size || item.fileSize || item.file_size || 0;
+  return { url: cdnUrl, fileName, size: item.size || item.fileSize || 0 };
+}
 
-  return { url: cdnUrl, fileName, size };
+/** Web scrape: DownloadPopUp widget → extract CDN URL from HTML */
+async function getDownloadLinkWeb(
+  gameDomain: string,
+  modId: number,
+  fileId: number,
+  gameId: number,
+): Promise<DownloadLink> {
+  const cookie = cookiesHeader();
+  if (!cookie) {
+    throw new NexusError(
+      "No API key and no NEXUS_COOKIES set. " +
+      "Set NEXUS_MODS_API_KEY (personal API key) or NEXUS_COOKIES (browser cookies JSON). " +
+      "See https://github.com/mbj733/nexus-mcp#authentication",
+    );
+  }
+
+  const dlUrl = `${WEB_BASE}/Core/Libs/Common/Widgets/DownloadPopUp`;
+  const res = await fetch(`${dlUrl}?id=${fileId}&game_id=${gameId}`, {
+    headers: {
+      "Cookie": cookie,
+      "Referer": `${WEB_BASE}/${gameDomain}/mods/${modId}?tab=files`,
+      "X-Requested-With": "XMLHttpRequest",
+      "User-Agent": USER_AGENT,
+    },
+  });
+
+  if (!res.ok) {
+    throw new NexusError(`DownloadPopUp HTTP ${res.status}: ${(await res.text()).slice(0, 500)}`);
+  }
+
+  const html = await res.text();
+
+  // Extract CDN URL: look for #dl_link input value
+  const dlLinkMatch = html.match(/id=["']dl_link["'][^>]*value=["']([^"']+)["']/i)
+    || html.match(/value=["']([^"']+)["'][^>]*id=["']dl_link["']/i);
+  if (dlLinkMatch?.[1]?.startsWith("http")) {
+    const cdnUrl = dlLinkMatch[1];
+    const urlPath = new URL(cdnUrl).pathname;
+    const fileName = decodeURIComponent(urlPath.split("/").pop() ?? "download");
+    return { url: cdnUrl, fileName, size: 0 };
+  }
+
+  // Fallback: scan for files.nexus-cdn.com URLs
+  const fallback = html.match(/https:\/\/files\.nexus-cdn\.com\/[^\s"'<>]+/i);
+  if (fallback) {
+    const cdnUrl = fallback[0];
+    const urlPath = new URL(cdnUrl).pathname;
+    const fileName = decodeURIComponent(urlPath.split("/").pop() ?? "download");
+    return { url: cdnUrl, fileName, size: 0 };
+  }
+
+  throw new NexusError(
+    `Could not extract CDN URL from DownloadPopUp (${html.length} bytes). ` +
+    "Your session cookies may have expired. Re-export fresh cookies.",
+  );
 }
 
 /**

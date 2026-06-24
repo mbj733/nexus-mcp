@@ -326,9 +326,9 @@ server.registerTool("get_download_url", {
         fileId: z.number().int().optional().describe("Specific file ID. If omitted, the primary (main) file is used."),
     },
 }, async ({ gameDomain, modId, fileId }) => {
+    const gameId = await resolveGameId(gameDomain);
     let fid = fileId;
     if (fid === undefined) {
-        const gameId = await resolveGameId(gameDomain);
         const data = await gql(`query ($modId: ID!, $gameId: ID!) {
           modFiles(modId: $modId, gameId: $gameId) { fileId primary }
         }`, { modId: String(modId), gameId: String(gameId) });
@@ -340,7 +340,7 @@ server.registerTool("get_download_url", {
         }
         fid = primary.fileId;
     }
-    const link = await getDownloadLink(gameDomain, modId, fid);
+    const link = await getDownloadLink(gameDomain, modId, fid, gameId);
     return jsonResult({
         url: link.url,
         fileName: link.fileName,
@@ -359,10 +359,10 @@ server.registerTool("download_mod", {
         destDir: z.string().optional().describe("Directory to save the file. Defaults to DOWNLOAD_DIR env var or current directory."),
     },
 }, async ({ gameDomain, modId, fileId, destDir }) => {
+    const gameId = await resolveGameId(gameDomain);
     let fid = fileId;
     let fileNameHint;
     if (fid === undefined) {
-        const gameId = await resolveGameId(gameDomain);
         const data = await gql(`query ($modId: ID!, $gameId: ID!) {
           modFiles(modId: $modId, gameId: $gameId) { fileId primary name }
         }`, { modId: String(modId), gameId: String(gameId) });
@@ -376,7 +376,7 @@ server.registerTool("download_mod", {
         fileNameHint = primary.name;
     }
     const dir = destDir || process.env.DOWNLOAD_DIR || process.cwd();
-    const link = await getDownloadLink(gameDomain, modId, fid);
+    const link = await getDownloadLink(gameDomain, modId, fid, gameId);
     const fileName = fileNameHint
         ? `${fileNameHint}-${link.fileName}`
         : link.fileName;

@@ -438,9 +438,9 @@ server.registerTool(
     },
   },
   async ({ gameDomain, modId, fileId }) => {
+    const gameId = await resolveGameId(gameDomain);
     let fid = fileId;
     if (fid === undefined) {
-      const gameId = await resolveGameId(gameDomain);
       const data = await gql<{ modFiles: { fileId: number; primary: number }[] }>(
         `query ($modId: ID!, $gameId: ID!) {
           modFiles(modId: $modId, gameId: $gameId) { fileId primary }
@@ -456,7 +456,7 @@ server.registerTool(
       fid = primary.fileId;
     }
 
-    const link = await getDownloadLink(gameDomain, modId, fid);
+    const link = await getDownloadLink(gameDomain, modId, fid, gameId);
     return jsonResult({
       url: link.url,
       fileName: link.fileName,
@@ -486,11 +486,11 @@ server.registerTool(
     },
   },
   async ({ gameDomain, modId, fileId, destDir }) => {
+    const gameId = await resolveGameId(gameDomain);
     let fid = fileId;
     let fileNameHint: string | undefined;
 
     if (fid === undefined) {
-      const gameId = await resolveGameId(gameDomain);
       const data = await gql<{ modFiles: { fileId: number; primary: number; name: string }[] }>(
         `query ($modId: ID!, $gameId: ID!) {
           modFiles(modId: $modId, gameId: $gameId) { fileId primary name }
@@ -508,7 +508,7 @@ server.registerTool(
     }
 
     const dir = destDir || process.env.DOWNLOAD_DIR || process.cwd();
-    const link = await getDownloadLink(gameDomain, modId, fid);
+    const link = await getDownloadLink(gameDomain, modId, fid, gameId);
 
     const fileName = fileNameHint
       ? `${fileNameHint}-${link.fileName}`

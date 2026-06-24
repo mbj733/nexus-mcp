@@ -56,11 +56,28 @@ Or in Claude Desktop's `claude_desktop_config.json`:
 
 ## Authentication
 
-`NEXUS_MODS_API_KEY` is **optional** — every tool works anonymously. When set
-(a [personal API key](https://www.nexusmods.com/users/myaccount?tab=api)), it is
-sent as the `apikey` header and unlocks viewer-relative fields
-(`viewerEndorsed`, `viewerTracked`, `viewerDownloaded`) on `get_mod`.
+Two options:
+
+### Option A: Personal API Key (recommended)
+
+`NEXUS_MODS_API_KEY` — generated at [nexusmods.com/users/myaccount?tab=api](https://www.nexusmods.com/users/myaccount?tab=api).
+When set, it is sent as the `APIKEY` header and unlocks viewer-relative fields
+(`viewerEndorsed`, `viewerTracked`, `viewerDownloaded`) on `get_mod`, plus
+enables the v1 REST download API.
 See `docs/adr/0001-personal-api-key-auth.md` for why this server skips OAuth.
+
+### Option B: Browser Cookies (fallback for download)
+
+If the API key download fails, set `NEXUS_COOKIES` as a JSON array of cookie objects
+(export from browser DevTools → Application → Cookies → nexusmods.com).
+The server will fall back to scraping the website's DownloadPopUp widget to get CDN URLs.
+
+```json
+[{"name":"nexusmods_session","value":"...","domain":".nexusmods.com"}, ...]
+```
+
+Both `NEXUS_MODS_API_KEY` and `NEXUS_COOKIES` can be set together — the server
+tries the API key first, then falls back to cookies for downloads.
 
 ## Development
 
