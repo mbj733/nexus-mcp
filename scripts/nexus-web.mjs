@@ -8,10 +8,9 @@
 
 import { createServer } from "node:http";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, createWriteStream } from "node:fs";
-import { join, dirname } from "node:path";
-import { homedir } from "node:os";
+import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
 import { spawn } from "node:child_process";
-import { tmpdir } from "node:os";
 
 const PORT = parseInt(process.argv[process.argv.indexOf("--port") + 1] || "3456");
 const COOKIES_FILE = join(homedir(), ".nexus-mcp-cookies.json");
@@ -56,7 +55,6 @@ button:disabled{opacity:.4;cursor:default}
 .mod-actions button{padding:4px 10px;font-size:12px}
 #log{background:#111;border-radius:8px;padding:12px;margin-top:12px;max-height:300px;overflow-y:auto;font:12px monospace;color:#0f0;white-space:pre-wrap}
 #log .err{color:#f44}
-#log .info{color:#88f}
 </style></head>
 <body>
 <header>
@@ -195,20 +193,22 @@ const server = createServer(async (req, res) => {
     }
 
     if (p === "/login") {
-      const candidates = [
-        "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-        "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-        join(process.env.LOCALAPPDATA || "", "Google\\Chrome\\Application\\chrome.exe"),
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        "/usr/bin/google-chrome",
+      const browsers = [
+        { path: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe" },
+        { path: "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe" },
+        { path: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" },
+        { path: "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe" },
+        { path: join(process.env.LOCALAPPDATA || "", "Google\\Chrome\\Application\\chrome.exe") },
+        { path: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" },
+        { path: "/usr/bin/google-chrome" },
       ];
-      const chrome = candidates.find(p => existsSync(p));
-      if (!chrome) return json(res, { ok: false, error: "Chrome not found" });
+      const browser = browsers.find(b => existsSync(b.path));
+      if (!browser) return json(res, { ok: false, error: "No browser found" });
 
-      const profile = join(tmpdir(), "nexus-web-chrome");
+      const profile = join(tmpdir(), "nexus-web-browser");
       mkdirSync(profile, { recursive: true });
 
-      spawn(chrome, [
+      spawn(browser.path, [
         "--remote-debugging-port=9223",
         `--user-data-dir=${profile}`,
         "--no-first-run",
