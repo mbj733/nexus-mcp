@@ -1,8 +1,8 @@
 # nexus-mcp
 
-A local MCP server for [Nexus Mods](https://www.nexusmods.com) mod discovery and
-research, backed by the v2 GraphQL API (`api.nexusmods.com/v2/graphql`).
-Read-only by design.
+A local MCP server for [Nexus Mods](https://www.nexusmods.com) mod discovery,
+research, and downloading, backed by the v2 GraphQL API (`api.nexusmods.com/v2/graphql`)
+and the website's DownloadPopUp widget.
 
 ## Tools
 
@@ -12,8 +12,8 @@ Read-only by design.
 | `search_mods` | Search mods by name/game/author/tag, sorted by endorsements etc. |
 | `get_mod` | Full mod details: description, requirements, tags, stats |
 | `get_mod_files` | A mod's downloadable files with versions and changelogs |
-| `get_download_url` | Get a pre-signed CDN download URL (requires API key) |
-| `download_mod` | Download a mod file to disk (requires API key) |
+| `get_download_url` | Get a pre-signed CDN download URL (needs API key or cookies) |
+| `download_mod` | Download a mod file to disk (needs API key or cookies) |
 | `search_collections` | Search curated mod lists |
 | `get_collection` | Collection metadata + full mod list (by slug, optional revision) |
 | `get_user` | User profile + their most-endorsed mods |
@@ -68,13 +68,14 @@ See `docs/adr/0001-personal-api-key-auth.md` for why this server skips OAuth.
 
 ### Option B: Browser Cookies (fallback for download)
 
-If the API key download fails, set `NEXUS_COOKIES` as a JSON array of cookie objects
-(export from browser DevTools → Application → Cookies → nexusmods.com).
-The server will fall back to scraping the website's DownloadPopUp widget to get CDN URLs.
+If you don't have an API key, use browser cookies instead. Run the helper script:
 
-```json
-[{"name":"nexusmods_session","value":"...","domain":".nexusmods.com"}, ...]
+```sh
+node scripts/login.mjs
 ```
+
+This launches Chrome → you log in manually → it extracts the cookies and prints
+the `NEXUS_COOKIES` value. Paste that into your MCP config.
 
 Both `NEXUS_MODS_API_KEY` and `NEXUS_COOKIES` can be set together — the server
 tries the API key first, then falls back to cookies for downloads.
@@ -84,6 +85,7 @@ tries the API key first, then falls back to cookies for downloads.
 ```sh
 npm run dev               # run from source via tsx
 node scripts/smoke.mjs    # end-to-end smoke test against the live API (needs build)
+node scripts/login.mjs    # extract Nexus Mods cookies from Chrome
 ```
 
 Domain terminology lives in `CONTEXT.md`.
